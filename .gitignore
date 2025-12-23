@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.ruff_cache/
+.pytest_cache/
+
+# Virtual environments
+.venv
+
+# ExternalProject outputs
+_deps/
+_build/
+
+# Generated stub files
+src/portaudio/portaudio_ext.pyi
+
+# wav
+*.wav

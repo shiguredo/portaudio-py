@@ -18,7 +18,8 @@ namespace nb = nanobind;
 using namespace nb::literals;
 
 // SampleFormat enum
-enum class SampleFormat { FLOAT32, INT32, INT24, INT16, INT8, UINT8 };
+// INT24 と INT8 は read/write で未対応のため削除
+enum class SampleFormat { FLOAT32, INT32, INT16, UINT8 };
 
 // SampleFormat を PaSampleFormat に変換
 static PaSampleFormat to_pa_format(SampleFormat format) {
@@ -27,12 +28,8 @@ static PaSampleFormat to_pa_format(SampleFormat format) {
       return paFloat32;
     case SampleFormat::INT32:
       return paInt32;
-    case SampleFormat::INT24:
-      return paInt24;
     case SampleFormat::INT16:
       return paInt16;
-    case SampleFormat::INT8:
-      return paInt8;
     case SampleFormat::UINT8:
       return paUInt8;
     default:
@@ -224,14 +221,24 @@ class Stream {
     if (!stream_) {
       return true;
     }
-    return Pa_IsStreamStopped(stream_) == 1;
+    PaError result = Pa_IsStreamStopped(stream_);
+    if (result < 0) {
+      throw std::runtime_error(std::string("Failed to check stream stopped: ") +
+                               Pa_GetErrorText(result));
+    }
+    return result == 1;
   }
 
   bool is_active() const {
     if (!stream_) {
       return false;
     }
-    return Pa_IsStreamActive(stream_) == 1;
+    PaError result = Pa_IsStreamActive(stream_);
+    if (result < 0) {
+      throw std::runtime_error(std::string("Failed to check stream active: ") +
+                               Pa_GetErrorText(result));
+    }
+    return result == 1;
   }
 
   PaTime get_time() const {
@@ -263,14 +270,24 @@ class Stream {
     if (!stream_) {
       return 0;
     }
-    return Pa_GetStreamReadAvailable(stream_);
+    signed long result = Pa_GetStreamReadAvailable(stream_);
+    if (result < 0) {
+      throw std::runtime_error(std::string("Failed to get read available: ") +
+                               Pa_GetErrorText(static_cast<PaError>(result)));
+    }
+    return result;
   }
 
   signed long get_write_available() const {
     if (!stream_) {
       return 0;
     }
-    return Pa_GetStreamWriteAvailable(stream_);
+    signed long result = Pa_GetStreamWriteAvailable(stream_);
+    if (result < 0) {
+      throw std::runtime_error(std::string("Failed to get write available: ") +
+                               Pa_GetErrorText(static_cast<PaError>(result)));
+    }
+    return result;
   }
 
   // 統一 read メソッド (フォーマットに応じて自動で型を返す)
@@ -294,9 +311,49 @@ class Stream {
   }
 
   // 統一 write メソッド (入力の型に応じて自動で処理)
-  void write(nb::ndarray<nb::numpy> buffer) {
+  // nb::c_contig で C-contiguous を強制
+  void write(nb::ndarray<nb::numpy, nb::c_contig> buffer) {
     if (!stream_) {
       throw std::runtime_error("Stream is not open");
+    }
+
+    // dtype の検証
+    nb::dlpack::dtype dtype = buffer.dtype();
+    bool dtype_ok = false;
+    switch (output_format_) {
+      case paFloat32:
+        dtype_ok = (dtype.code ==
+                        static_cast<uint8_t>(nb::dlpack::dtype_code::Float) &&
+                    dtype.bits == 32);
+        break;
+      case paInt32:
+        dtype_ok =
+            (dtype.code == static_cast<uint8_t>(nb::dlpack::dtype_code::Int) &&
+             dtype.bits == 32);
+        break;
+      case paInt16:
+        dtype_ok =
+            (dtype.code == static_cast<uint8_t>(nb::dlpack::dtype_code::Int) &&
+             dtype.bits == 16);
+        break;
+      case paUInt8:
+        dtype_ok =
+            (dtype.code == static_cast<uint8_t>(nb::dlpack::dtype_code::UInt) &&
+             dtype.bits == 8);
+        break;
+      default:
+        throw std::runtime_error("Unsupported sample format");
+    }
+    if (!dtype_ok) {
+      throw std::runtime_error("Buffer dtype mismatch with stream format");
+    }
+
+    // shape の検証
+    if (buffer.ndim() != 2) {
+      throw std::runtime_error("Buffer must be 2D array [frames, channels]");
+    }
+    if (static_cast<int>(buffer.shape(1)) != output_channels_) {
+      throw std::runtime_error("Buffer channel count mismatch with stream");
     }
 
     unsigned long frames = buffer.shape(0);
@@ -316,6 +373,26 @@ class Stream {
       unsigned long frames) {
     if (!stream_) {
       throw std::runtime_error("Stream is not open");
+    }
+
+    // フォーマットチェック
+    if (input_format_ != paFloat32) {
+      throw std::runtime_error(
+          "Stream format mismatch: read_float32 requires FLOAT32 format");
+    }
+
+    // frames の検証
+    if (frames == 0) {
+      throw std::runtime_error("frames must be greater than 0");
+    }
+    if (input_channels_ <= 0) {
+      throw std::runtime_error("Invalid input channels");
+    }
+
+    // 桁あふれチェック
+    constexpr size_t max_samples = SIZE_MAX / sizeof(float);
+    if (frames > max_samples / static_cast<size_t>(input_channels_)) {
+      throw std::runtime_error("frames too large, would cause overflow");
     }
 
     size_t total_samples = frames * input_channels_;
@@ -345,6 +422,26 @@ class Stream {
       throw std::runtime_error("Stream is not open");
     }
 
+    // フォーマットチェック
+    if (input_format_ != paInt16) {
+      throw std::runtime_error(
+          "Stream format mismatch: read_int16 requires INT16 format");
+    }
+
+    // frames の検証
+    if (frames == 0) {
+      throw std::runtime_error("frames must be greater than 0");
+    }
+    if (input_channels_ <= 0) {
+      throw std::runtime_error("Invalid input channels");
+    }
+
+    // 桁あふれチェック
+    constexpr size_t max_samples = SIZE_MAX / sizeof(int16_t);
+    if (frames > max_samples / static_cast<size_t>(input_channels_)) {
+      throw std::runtime_error("frames too large, would cause overflow");
+    }
+
     size_t total_samples = frames * input_channels_;
     int16_t* data = new int16_t[total_samples];
 
@@ -370,6 +467,26 @@ class Stream {
       unsigned long frames) {
     if (!stream_) {
       throw std::runtime_error("Stream is not open");
+    }
+
+    // フォーマットチェック
+    if (input_format_ != paInt32) {
+      throw std::runtime_error(
+          "Stream format mismatch: read_int32 requires INT32 format");
+    }
+
+    // frames の検証
+    if (frames == 0) {
+      throw std::runtime_error("frames must be greater than 0");
+    }
+    if (input_channels_ <= 0) {
+      throw std::runtime_error("Invalid input channels");
+    }
+
+    // 桁あふれチェック
+    constexpr size_t max_samples = SIZE_MAX / sizeof(int32_t);
+    if (frames > max_samples / static_cast<size_t>(input_channels_)) {
+      throw std::runtime_error("frames too large, would cause overflow");
     }
 
     size_t total_samples = frames * input_channels_;
@@ -399,6 +516,26 @@ class Stream {
       throw std::runtime_error("Stream is not open");
     }
 
+    // フォーマットチェック
+    if (input_format_ != paUInt8) {
+      throw std::runtime_error(
+          "Stream format mismatch: read_uint8 requires UINT8 format");
+    }
+
+    // frames の検証
+    if (frames == 0) {
+      throw std::runtime_error("frames must be greater than 0");
+    }
+    if (input_channels_ <= 0) {
+      throw std::runtime_error("Invalid input channels");
+    }
+
+    // 桁あふれチェック
+    constexpr size_t max_samples = SIZE_MAX / sizeof(uint8_t);
+    if (frames > max_samples / static_cast<size_t>(input_channels_)) {
+      throw std::runtime_error("frames too large, would cause overflow");
+    }
+
     size_t total_samples = frames * input_channels_;
     uint8_t* data = new uint8_t[total_samples];
 
@@ -425,6 +562,12 @@ class Stream {
       throw std::runtime_error("Stream is not open");
     }
 
+    // フォーマットチェック
+    if (output_format_ != paFloat32) {
+      throw std::runtime_error(
+          "Stream format mismatch: write_float32 requires FLOAT32 format");
+    }
+
     unsigned long frames = buffer.shape(0);
     const void* data = buffer.data();
     PaError err;
@@ -441,6 +584,12 @@ class Stream {
   void write_int16(nb::ndarray<nb::numpy, const int16_t, nb::ndim<2>> buffer) {
     if (!stream_) {
       throw std::runtime_error("Stream is not open");
+    }
+
+    // フォーマットチェック
+    if (output_format_ != paInt16) {
+      throw std::runtime_error(
+          "Stream format mismatch: write_int16 requires INT16 format");
     }
 
     unsigned long frames = buffer.shape(0);
@@ -461,6 +610,12 @@ class Stream {
       throw std::runtime_error("Stream is not open");
     }
 
+    // フォーマットチェック
+    if (output_format_ != paInt32) {
+      throw std::runtime_error(
+          "Stream format mismatch: write_int32 requires INT32 format");
+    }
+
     unsigned long frames = buffer.shape(0);
     const void* data = buffer.data();
     PaError err;
@@ -477,6 +632,12 @@ class Stream {
   void write_uint8(nb::ndarray<nb::numpy, const uint8_t, nb::ndim<2>> buffer) {
     if (!stream_) {
       throw std::runtime_error("Stream is not open");
+    }
+
+    // フォーマットチェック
+    if (output_format_ != paUInt8) {
+      throw std::runtime_error(
+          "Stream format mismatch: write_uint8 requires UINT8 format");
     }
 
     unsigned long frames = buffer.shape(0);
@@ -501,12 +662,8 @@ class Stream {
         return SampleFormat::FLOAT32;
       case paInt32:
         return SampleFormat::INT32;
-      case paInt24:
-        return SampleFormat::INT24;
       case paInt16:
         return SampleFormat::INT16;
-      case paInt8:
-        return SampleFormat::INT8;
       case paUInt8:
         return SampleFormat::UINT8;
       default:
@@ -540,12 +697,11 @@ static PaDeviceIndex get_device_index(const nb::object& device) {
 // ========== 型バインディング ==========
 static void init_pa_types(nb::module_& m) {
   // SampleFormat enum
+  // INT24 と INT8 は read/write で未対応のため除外
   nb::enum_<SampleFormat>(m, "SampleFormat")
       .value("FLOAT32", SampleFormat::FLOAT32)
       .value("INT32", SampleFormat::INT32)
-      .value("INT24", SampleFormat::INT24)
       .value("INT16", SampleFormat::INT16)
-      .value("INT8", SampleFormat::INT8)
       .value("UINT8", SampleFormat::UINT8);
 
   // エラーコード
@@ -833,8 +989,12 @@ NB_MODULE(portaudio_ext, m) {
   m.def("list_devices", []() -> std::vector<DeviceInfoWrapper> {
     ensure_pa_init();
     std::vector<DeviceInfoWrapper> devices;
-    int count = Pa_GetDeviceCount();
-    for (int i = 0; i < count; i++) {
+    PaDeviceIndex count = Pa_GetDeviceCount();
+    if (count < 0) {
+      throw std::runtime_error(std::string("Failed to get device count: ") +
+                               Pa_GetErrorText(count));
+    }
+    for (PaDeviceIndex i = 0; i < count; i++) {
       const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
       if (info) {
         devices.push_back(DeviceInfoWrapper::from_pa(i, info));
@@ -847,8 +1007,12 @@ NB_MODULE(portaudio_ext, m) {
   m.def("list_input_devices", []() -> std::vector<DeviceInfoWrapper> {
     ensure_pa_init();
     std::vector<DeviceInfoWrapper> devices;
-    int count = Pa_GetDeviceCount();
-    for (int i = 0; i < count; i++) {
+    PaDeviceIndex count = Pa_GetDeviceCount();
+    if (count < 0) {
+      throw std::runtime_error(std::string("Failed to get device count: ") +
+                               Pa_GetErrorText(count));
+    }
+    for (PaDeviceIndex i = 0; i < count; i++) {
       const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
       if (info && info->maxInputChannels > 0) {
         devices.push_back(DeviceInfoWrapper::from_pa(i, info));
@@ -861,8 +1025,12 @@ NB_MODULE(portaudio_ext, m) {
   m.def("list_output_devices", []() -> std::vector<DeviceInfoWrapper> {
     ensure_pa_init();
     std::vector<DeviceInfoWrapper> devices;
-    int count = Pa_GetDeviceCount();
-    for (int i = 0; i < count; i++) {
+    PaDeviceIndex count = Pa_GetDeviceCount();
+    if (count < 0) {
+      throw std::runtime_error(std::string("Failed to get device count: ") +
+                               Pa_GetErrorText(count));
+    }
+    for (PaDeviceIndex i = 0; i < count; i++) {
       const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
       if (info && info->maxOutputChannels > 0) {
         devices.push_back(DeviceInfoWrapper::from_pa(i, info));
@@ -970,12 +1138,22 @@ NB_MODULE(portaudio_ext, m) {
   // Host API 関数
   m.def("get_host_api_count", []() {
     ensure_pa_init();
-    return Pa_GetHostApiCount();
+    PaHostApiIndex count = Pa_GetHostApiCount();
+    if (count < 0) {
+      throw std::runtime_error(std::string("Failed to get host API count: ") +
+                               Pa_GetErrorText(count));
+    }
+    return count;
   });
 
   m.def("get_default_host_api", []() {
     ensure_pa_init();
-    return Pa_GetDefaultHostApi();
+    PaHostApiIndex index = Pa_GetDefaultHostApi();
+    if (index < 0) {
+      throw std::runtime_error(std::string("Failed to get default host API: ") +
+                               Pa_GetErrorText(index));
+    }
+    return index;
   });
 
   m.def(
@@ -1006,7 +1184,12 @@ NB_MODULE(portaudio_ext, m) {
   // デバイス関数
   m.def("get_device_count", []() {
     ensure_pa_init();
-    return Pa_GetDeviceCount();
+    PaDeviceIndex count = Pa_GetDeviceCount();
+    if (count < 0) {
+      throw std::runtime_error(std::string("Failed to get device count: ") +
+                               Pa_GetErrorText(count));
+    }
+    return count;
   });
 
   m.def("get_default_input_device", []() {
@@ -1043,55 +1226,75 @@ NB_MODULE(portaudio_ext, m) {
   m.def("sleep", [](long msec) { Pa_Sleep(msec); }, "msec"_a);
 
   // 後方互換性のためのヘルパー関数
-  m.def("get_all_devices",
-        []() -> std::vector<std::pair<PaDeviceIndex, DeviceInfoWrapper>> {
-          ensure_pa_init();
-          std::vector<std::pair<PaDeviceIndex, DeviceInfoWrapper>> devices;
-          int count = Pa_GetDeviceCount();
-          for (int i = 0; i < count; i++) {
-            const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
-            if (info) {
-              devices.push_back({i, DeviceInfoWrapper::from_pa(i, info)});
-            }
+  m.def(
+      "get_all_devices",
+      []() -> std::vector<std::pair<PaDeviceIndex, DeviceInfoWrapper>> {
+        ensure_pa_init();
+        std::vector<std::pair<PaDeviceIndex, DeviceInfoWrapper>> devices;
+        PaDeviceIndex count = Pa_GetDeviceCount();
+        if (count < 0) {
+          throw std::runtime_error(std::string("Failed to get device count: ") +
+                                   Pa_GetErrorText(count));
+        }
+        for (PaDeviceIndex i = 0; i < count; i++) {
+          const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
+          if (info) {
+            devices.push_back({i, DeviceInfoWrapper::from_pa(i, info)});
           }
-          return devices;
-        });
+        }
+        return devices;
+      });
 
-  m.def("get_input_devices",
-        []() -> std::vector<std::pair<PaDeviceIndex, DeviceInfoWrapper>> {
-          ensure_pa_init();
-          std::vector<std::pair<PaDeviceIndex, DeviceInfoWrapper>> devices;
-          int count = Pa_GetDeviceCount();
-          for (int i = 0; i < count; i++) {
-            const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
-            if (info && info->maxInputChannels > 0) {
-              devices.push_back({i, DeviceInfoWrapper::from_pa(i, info)});
-            }
+  m.def(
+      "get_input_devices",
+      []() -> std::vector<std::pair<PaDeviceIndex, DeviceInfoWrapper>> {
+        ensure_pa_init();
+        std::vector<std::pair<PaDeviceIndex, DeviceInfoWrapper>> devices;
+        PaDeviceIndex count = Pa_GetDeviceCount();
+        if (count < 0) {
+          throw std::runtime_error(std::string("Failed to get device count: ") +
+                                   Pa_GetErrorText(count));
+        }
+        for (PaDeviceIndex i = 0; i < count; i++) {
+          const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
+          if (info && info->maxInputChannels > 0) {
+            devices.push_back({i, DeviceInfoWrapper::from_pa(i, info)});
           }
-          return devices;
-        });
+        }
+        return devices;
+      });
 
-  m.def("get_output_devices",
-        []() -> std::vector<std::pair<PaDeviceIndex, DeviceInfoWrapper>> {
-          ensure_pa_init();
-          std::vector<std::pair<PaDeviceIndex, DeviceInfoWrapper>> devices;
-          int count = Pa_GetDeviceCount();
-          for (int i = 0; i < count; i++) {
-            const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
-            if (info && info->maxOutputChannels > 0) {
-              devices.push_back({i, DeviceInfoWrapper::from_pa(i, info)});
-            }
+  m.def(
+      "get_output_devices",
+      []() -> std::vector<std::pair<PaDeviceIndex, DeviceInfoWrapper>> {
+        ensure_pa_init();
+        std::vector<std::pair<PaDeviceIndex, DeviceInfoWrapper>> devices;
+        PaDeviceIndex count = Pa_GetDeviceCount();
+        if (count < 0) {
+          throw std::runtime_error(std::string("Failed to get device count: ") +
+                                   Pa_GetErrorText(count));
+        }
+        for (PaDeviceIndex i = 0; i < count; i++) {
+          const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
+          if (info && info->maxOutputChannels > 0) {
+            devices.push_back({i, DeviceInfoWrapper::from_pa(i, info)});
           }
-          return devices;
-        });
+        }
+        return devices;
+      });
 
   m.def(
       "get_all_host_apis",
       []() -> std::vector<std::pair<PaHostApiIndex, const PaHostApiInfo*>> {
         ensure_pa_init();
         std::vector<std::pair<PaHostApiIndex, const PaHostApiInfo*>> apis;
-        int count = Pa_GetHostApiCount();
-        for (int i = 0; i < count; i++) {
+        PaHostApiIndex count = Pa_GetHostApiCount();
+        if (count < 0) {
+          throw std::runtime_error(
+              std::string("Failed to get host API count: ") +
+              Pa_GetErrorText(count));
+        }
+        for (PaHostApiIndex i = 0; i < count; i++) {
           const PaHostApiInfo* info = Pa_GetHostApiInfo(i);
           if (info) {
             apis.push_back({i, info});

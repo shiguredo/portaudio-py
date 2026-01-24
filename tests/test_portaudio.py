@@ -460,3 +460,90 @@ def test_stream_write_available() -> None:
         available = stream.get_write_available()
         assert isinstance(available, int)
         assert available >= 0
+
+
+# ========== フォーマット不一致テスト ==========
+
+
+@requires_input_device
+def test_read_format_mismatch_int16() -> None:
+    """FLOAT32 ストリームで read_int16 を呼ぶと例外が発生することを確認する"""
+    with pa.open_input(format=pa.SampleFormat.FLOAT32) as stream:
+        with pytest.raises(RuntimeError, match="format mismatch"):
+            stream.read_int16(1024)
+
+
+@requires_input_device
+def test_read_format_mismatch_int32() -> None:
+    """FLOAT32 ストリームで read_int32 を呼ぶと例外が発生することを確認する"""
+    with pa.open_input(format=pa.SampleFormat.FLOAT32) as stream:
+        with pytest.raises(RuntimeError, match="format mismatch"):
+            stream.read_int32(1024)
+
+
+@requires_input_device
+def test_read_format_mismatch_uint8() -> None:
+    """FLOAT32 ストリームで read_uint8 を呼ぶと例外が発生することを確認する"""
+    with pa.open_input(format=pa.SampleFormat.FLOAT32) as stream:
+        with pytest.raises(RuntimeError, match="format mismatch"):
+            stream.read_uint8(1024)
+
+
+@requires_input_device
+def test_read_format_mismatch_float32() -> None:
+    """INT16 ストリームで read_float32 を呼ぶと例外が発生することを確認する"""
+    with pa.open_input(format=pa.SampleFormat.INT16) as stream:
+        with pytest.raises(RuntimeError, match="format mismatch"):
+            stream.read_float32(1024)
+
+
+@requires_output_device
+def test_write_format_mismatch_int16() -> None:
+    """FLOAT32 ストリームで write_int16 を呼ぶと例外が発生することを確認する"""
+    with pa.open_output(format=pa.SampleFormat.FLOAT32) as stream:
+        data = np.zeros((1024, 1), dtype=np.int16)
+        with pytest.raises(RuntimeError, match="format mismatch"):
+            stream.write_int16(data)
+
+
+@requires_output_device
+def test_write_format_mismatch_float32() -> None:
+    """INT16 ストリームで write_float32 を呼ぶと例外が発生することを確認する"""
+    with pa.open_output(format=pa.SampleFormat.INT16) as stream:
+        data = np.zeros((1024, 1), dtype=np.float32)
+        with pytest.raises(RuntimeError, match="format mismatch"):
+            stream.write_float32(data)
+
+
+# ========== write 検証テスト ==========
+
+
+@requires_output_device
+def test_write_dtype_mismatch() -> None:
+    """write で dtype が不一致の場合に例外が発生することを確認する"""
+    with pa.open_output(format=pa.SampleFormat.FLOAT32) as stream:
+        data = np.zeros((1024, 1), dtype=np.int16)
+        with pytest.raises(RuntimeError, match="dtype mismatch"):
+            stream.write(data)
+
+
+@requires_output_device
+def test_write_channel_mismatch() -> None:
+    """write でチャンネル数が不一致の場合に例外が発生することを確認する"""
+    with pa.open_output(format=pa.SampleFormat.FLOAT32, channels=1) as stream:
+        data = np.zeros((1024, 2), dtype=np.float32)
+        with pytest.raises(RuntimeError, match="channel count mismatch"):
+            stream.write(data)
+
+
+# ========== INT24/INT8 未対応テスト ==========
+
+
+def test_sample_format_no_int24() -> None:
+    """SampleFormat に INT24 が存在しないことを確認する"""
+    assert not hasattr(pa.SampleFormat, "INT24")
+
+
+def test_sample_format_no_int8() -> None:
+    """SampleFormat に INT8 が存在しないことを確認する"""
+    assert not hasattr(pa.SampleFormat, "INT8")
